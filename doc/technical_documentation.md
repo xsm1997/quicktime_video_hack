@@ -92,7 +92,7 @@
 ## 0. General Information
 This document provides you with details about the screen sharing feature of QuickTime for iOS devices. 
 The information contained in this document can be used to re-implement that feature in the programming language of choice and use
-the feature on other operating systems than MAC OS X.
+the feature on other operating systems than MAC OS X. If you want to implement the feature, I recommend using my unit tests and test fixtures. I have prepared a bin dump with an example for every message type. This way you can easily make sure your codec does what it's supposed to.
 The repository also contains a reference implementation in Golang. 
 
 -- Note: All the information in this document is reverse engineered by the author, therefore it could be wrong or not entirely accurate
@@ -191,14 +191,14 @@ Also this will be used for all ASYN_EAT packets containing audio sample buffers.
 
 #### 3.2.3. AFMT Packet
 ##### General Description
-This packet contains information about the Audio Format(AMFT).  I assume the lpcm marker, which is followed by 7 integer values is somekind of information about Linear pulse-code modulation (LPCM)
+This packet contains information about the Audio Format(AMFT). It contains a AudioStreamBasicDescription struct [see here](https://github.com/nu774/MSResampler/blob/master/CoreAudio/CoreAudioTypes.h). It is usually of MediaID Linear pulse-code modulation (LPCM), which means uncompressed audio.
 The response is basically a dictionary containing an error code. Normally we send 0 to indicate everything is ok.
 Note how the device references the Clock we gave it in the SYNC_CWPA_RPLY
 ##### Request Format Description
 
-| 4 Byte Length (68)   |4 Byte Magic (SYNC)   | 8 bytes clock CFTypeID| 4 byte magic (AFMT)| 8 byte correlation id| some weird data| 4 byte magic (LPCM) |  28 bytes what i think is pcm data|
-|---|---|---|---|---|---|---|---|
-|44000000| 636E7973| B00CE26C A67F0000| 746D6661 | 809D2213 01000000| 00000000 0070E740 |6D63706C| 4C000000 04000000 01000000 04000000 02000000 10000000 00000000|
+| 4 Byte Length (68)   |4 Byte Magic (SYNC)   | 8 bytes clock CFTypeID| 4 byte magic (AFMT)| 8 byte correlation id| AudioStreamBasicDescription struct: float64 sampling frequency (48khz), data 4 byte magic (LPCM),   28 bytes rest|
+|---|---|---|---|---|---|
+|44000000| 636E7973| B00CE26C A67F0000| 746D6661 | 809D2213 01000000| 00000000 0070E740 6D63706C 4C000000 04000000 01000000 04000000 02000000 10000000 00000000|
 
 ##### Reply - RPLY Format Description
 Contains the correlationID from the request as well as a simple Dictionary:  {"Error":NSNumberUint32(0)}
@@ -260,8 +260,13 @@ This packet requests from us to send a RPLY with the current CMTime for the Cloc
 
 #### 3.2.7. SKEW Packet
 ##### General Description
-This is clearly some message related to clock skew. I am still in process of figuring out how it works exactly.
-The stream works even if these are completely ignored for now. 
+This packet tells the device about the clock skew of the audio clock (clockRef used in EAT! packets, which we sent as response to cwpa). As denoted in this [wikipedia](https://en.wikipedia.org/wiki/Clock_skew#On_a_network) article, clock skew means the difference in frequency of both clocks. In other words, both clocks supposedly 
+run at 48khz, and the device wants to know how many ticks per second our clock executed during the time the device clock had one tick. 
+So we have to respond with:
+- 48000 if the clocks were aligned
+- some value above 48000 if our clock was slower
+- and some value below 48000 if our clock was faster than the device clock
+If implemented correctly, we should see that the skew responses converge towards 48000 with small deviations sometimes `(48000+x where -1 < x <1)`
 
 ##### Request Format Description
 

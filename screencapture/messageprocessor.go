@@ -2,6 +2,7 @@ package screencapture
 
 import (
 	"encoding/binary"
+	"time"
 
 	"github.com/danielpaulus/quicktime_video_hack/screencapture/coremedia"
 	"github.com/danielpaulus/quicktime_video_hack/screencapture/packet"
@@ -12,16 +13,23 @@ import (
 //It receives readily split byte frames, parses them, responds to them and passes on
 //extracted CMSampleBuffers to a consumer
 type MessageProcessor struct {
-	connectionState      int
-	usbWriter            UsbWriter
-	stopSignal           chan interface{}
-	clock                coremedia.CMClock
-	totalBytesReceived   int
-	needClockRef         packet.CFTypeID
-	needMessage          []byte
-	audioSamplesReceived int
-	cmSampleBufConsumer  CmSampleBufConsumer
-	clockBuilder         func(uint64) coremedia.CMClock
+	usbWriter                                UsbWriter
+	stopSignal                               chan interface{}
+	clock                                    coremedia.CMClock
+	localAudioClock                          coremedia.CMClock
+	needClockRef                             packet.CFTypeID
+	needMessage                              []byte
+	audioSamplesReceived                     int
+	videoSamplesReceived                     int
+	cmSampleBufConsumer                      CmSampleBufConsumer
+	clockBuilder                             func(uint64) coremedia.CMClock
+	deviceAudioClockRef                      packet.CFTypeID
+	releaseWaiter                            chan interface{}
+	firstAudioTimeTaken                      bool
+	startTimeDeviceAudioClock                coremedia.CMTime
+	startTimeLocalAudioClock                 coremedia.CMTime
+	lastEatFrameReceivedDeviceAudioClockTime coremedia.CMTime
+	lastEatFrameReceivedLocalAudioClockTime  coremedia.CMTime
 }
 
 //NewMessageProcessor creates a new MessageProcessor that will write answers to the given UsbWriter,
@@ -33,7 +41,7 @@ func NewMessageProcessor(usbWriter UsbWriter, stopSignal chan interface{}, consu
 
 //NewMessageProcessorWithClockBuilder lets you inject a clockBuilder for the sake of testability.
 func NewMessageProcessorWithClockBuilder(usbWriter UsbWriter, stopSignal chan interface{}, consumer CmSampleBufConsumer, clockBuilder func(uint64) coremedia.CMClock) MessageProcessor {
-	var mp = MessageProcessor{usbWriter: usbWriter, stopSignal: stopSignal, cmSampleBufConsumer: consumer, clockBuilder: clockBuilder}
+	var mp = MessageProcessor{usbWriter: usbWriter, stopSignal: stopSignal, cmSampleBufConsumer: consumer, clockBuilder: clockBuilder, releaseWaiter: make(chan interface{}), firstAudioTimeTaken: false}
 	return mp
 }
 
@@ -42,7 +50,7 @@ func NewMessageProcessorWithClockBuilder(usbWriter UsbWriter, stopSignal chan in
 func (mp *MessageProcessor) ReceiveData(data []byte) {
 	switch binary.LittleEndian.Uint32(data) {
 	case packet.PingPacketMagic:
-		log.Debug("initial ping received, sending ping back")
+		log.Info("AudioVideo-Stream has started")
 		mp.usbWriter.WriteDataToUsb(packet.NewPingPacketAsBytes())
 		return
 	case packet.SyncPacketMagic:
@@ -78,6 +86,8 @@ func (mp *MessageProcessor) handleSyncPacket(data []byte) {
 		log.Debugf("Rcv:%s", cwpaPacket.String())
 		clockRef := cwpaPacket.DeviceClockRef + 1000
 
+		mp.localAudioClock = coremedia.NewCMClockWithHostTime(clockRef)
+		mp.deviceAudioClockRef = cwpaPacket.DeviceClockRef
 		deviceInfo := packet.NewAsynHpd1Packet(packet.CreateHpd1DeviceInfoDict())
 		log.Debug("Sending ASYN HPD1")
 		mp.usbWriter.WriteDataToUsb(deviceInfo)
@@ -143,8 +153,16 @@ func (mp *MessageProcessor) handleSyncPacket(data []byte) {
 		if err != nil {
 			log.Error("Error parsing SYNC SKEW packet", err)
 		}
-		log.Debugf("Rcv and ignore:%s", skewPacket.String())
-
+		skewValue := coremedia.CalculateSkew(mp.startTimeLocalAudioClock, mp.lastEatFrameReceivedLocalAudioClockTime, mp.startTimeDeviceAudioClock, mp.lastEatFrameReceivedDeviceAudioClockTime)
+		log.Debugf("Rcv:%s Reply:%f", skewPacket.String(), skewValue)
+		mp.usbWriter.WriteDataToUsb(skewPacket.NewReply(skewValue))
+	case packet.STOP:
+		stopPacket, err := packet.NewSyncStopPacketFromBytes(data)
+		if err != nil {
+			log.Error("Error parsing SYNC STOP packet", err)
+		}
+		log.Debugf("Rcv:%s", stopPacket.String())
+		mp.usbWriter.WriteDataToUsb(stopPacket.NewReply())
 	default:
 		log.Warnf("received unknown sync packet type: %x", data)
 		mp.stop()
@@ -155,21 +173,47 @@ func (mp *MessageProcessor) handleAsyncPacket(data []byte) {
 	switch binary.LittleEndian.Uint32(data[12:]) {
 	case packet.EAT:
 		mp.audioSamplesReceived++
+		eatPacket, err := packet.NewAsynCmSampleBufPacketFromBytes(data)
+		if err != nil {
+			log.Warn("unknown eat")
+			return
+		}
+		if !mp.firstAudioTimeTaken {
+			mp.startTimeDeviceAudioClock = eatPacket.CMSampleBuf.OutputPresentationTimestamp
+			mp.startTimeLocalAudioClock = mp.localAudioClock.GetTime()
+			mp.lastEatFrameReceivedDeviceAudioClockTime = eatPacket.CMSampleBuf.OutputPresentationTimestamp
+			mp.lastEatFrameReceivedLocalAudioClockTime = mp.startTimeLocalAudioClock
+			mp.firstAudioTimeTaken = true
+		} else {
+			mp.lastEatFrameReceivedDeviceAudioClockTime = eatPacket.CMSampleBuf.OutputPresentationTimestamp
+			mp.lastEatFrameReceivedLocalAudioClockTime = mp.localAudioClock.GetTime()
+		}
+
+		err = mp.cmSampleBufConsumer.Consume(eatPacket.CMSampleBuf)
+		if err != nil {
+			log.Warn("failed consuming audio buf", err)
+			return
+		}
 		if mp.audioSamplesReceived%100 == 0 {
 			log.Debugf("RCV Audio Samples:%d", mp.audioSamplesReceived)
 		}
 	case packet.FEED:
-		feedPacket, err := packet.NewAsynFeedPacketFromBytes(data)
+		feedPacket, err := packet.NewAsynCmSampleBufPacketFromBytes(data)
 		if err != nil {
-			//log.Errorf("Error parsing FEED packet: %x %s", data, err)
-			log.Warn("unknown feed")
+			log.Errorf("Error parsing FEED packet: %x %s", data, err)
+			mp.usbWriter.WriteDataToUsb(mp.needMessage)
 			return
 		}
+		mp.videoSamplesReceived++
 		err = mp.cmSampleBufConsumer.Consume(feedPacket.CMSampleBuf)
 		if err != nil {
 			log.Fatal("Failed writing sample data to Consumer", err)
 		}
-		log.Debugf("Rcv:%s", feedPacket.String())
+		if mp.videoSamplesReceived%500 == 0 {
+			log.Debugf("Rcv'd(%d) last:%s", mp.videoSamplesReceived, feedPacket.String())
+			mp.videoSamplesReceived = 0
+		}
+
 		mp.usbWriter.WriteDataToUsb(mp.needMessage)
 	case packet.SPRP:
 		sprpPacket, err := packet.NewAsynSprpPacketFromBytes(data)
@@ -199,10 +243,38 @@ func (mp *MessageProcessor) handleAsyncPacket(data []byte) {
 			return
 		}
 		log.Debugf("Rcv:%s", tbasPacket.String())
+	case packet.RELS:
+		relsPacket, err := packet.NewAsynRelsPacketFromBytes(data)
+		if err != nil {
+			log.Error("Error parsing RELS packet", err)
+			return
+		}
+		log.Debugf("Rcv:%s", relsPacket.String())
+		var signal interface{}
+		mp.releaseWaiter <- signal
 	default:
 		log.Warnf("received unknown async packet type: %x", data)
 		mp.stop()
 	}
+}
+
+//CloseSession shuts down the streams on the device by sending HPA0 and HPD0
+//messages and waiting for RELS messages.
+func (mp *MessageProcessor) CloseSession() {
+	log.Info("Telling device to stop streaming..")
+	mp.usbWriter.WriteDataToUsb(packet.NewAsynHPA0(mp.deviceAudioClockRef))
+	mp.usbWriter.WriteDataToUsb(packet.NewAsynHPD0())
+	log.Info("Waiting for device to tell us to stop..")
+	for i := 0; i < 2; i++ {
+		select {
+		case <-mp.releaseWaiter:
+		case <-time.After(3 * time.Second):
+			log.Warn("Timed out waiting for device closing")
+			return
+		}
+	}
+	mp.usbWriter.WriteDataToUsb(packet.NewAsynHPD0())
+	log.Info("OK. Ready to release USB Device.")
 }
 
 func (mp MessageProcessor) stop() {

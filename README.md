@@ -5,44 +5,48 @@
 
 ## 1. What is this?
 This is an Operating System indepedent implementation for Quicktime Screensharing for iOS devices :-)
+
+[Check out my presentation](https://danielpaulus.github.io/quicktime_video_hack_presentation)
+
+[See a demo on YouTube](https://youtu.be/8v5f_ybSjHk)
+
 This repository contains all the code you will need to grab and record video and audio from your iPhone or iPad 
 without needing one of these expensive MacOS X computers :-D
 It probably does something similar to what `QuickTime` and `com.apple.cmio.iOSScreenCaptureAssistant` are doing on MacOS.
-Currently you can use it to create a h264 file that is playable with VLC and watch a recording of your devices screen :-D
+Currently you can use it to create a h264 file and a wave file so you can watch and listen what was happening on your device. 
+I am finishing up and RTP implementation so you can live watch and hear your device. 
 If you want to contribute to code or documentation, please go ahead :-D
 
 ## 2. Technical Docs
 I have written some documentation here [doc/technical_documentation.md](https://github.com/danielpaulus/quicktime_video_hack/blob/master/doc/technical_documentation.md)
 So if you are just interested in the protocol or if you want to implement this in a different programming language than golang, read the docs.
 ## 3. Usage& Current State of the Tool
-run `go run main.go --help` to see how it works
+- run `qvh --help` to see how it works
+- The `record` command lets you save iOS video and Audio into separate h264 and wave files.
+- The `gstreamer` command will render the video in a nice window on your screen. For this to work you need to install gstreamer on you machine.
 
 Progress:
-1. ~~Make the `go run main.go dumpraw` work on the first execution (currently you have to run it twice and it will start recording on the second run)~~
-2. FIX: After running the dumpraw command and saving a video, you have to unplug the device to record another video currently
-3. Make a release :-D
-4. Generate GStreamer compatible x264 stream probably by wrapping the NaLus in RTP headers
-5. ~~Complete packet documentation~~
-6. Send correct replies for clock SKEW packets
 
+0. ~Fix it for MacOS X~
+
+0a. Release 0.1-beta
+
+1. Use Gstreamer to create a nice Window with Video and Audio
+2. Release 0.2-beta
+3. Allow Creating MPEG files
+4. Release 0.3-beta
+5. BUG- Linux Only: After running the tool to grab AV data, you have to unplug the device to make it work again
+6. BUG- MacOSX Only: After running the tool, you have to wait a while until it works again (or keep restarting the tool)
 
 Extra Goals:
 
-0. Also save the device audio stream (I am already decoding it and receiving it, just not doing anything with it for now) 
 1. [Port to Windows](https://github.com/danielpaulus/quicktime_video_hack/tree/windows/windows) (I don't know why, but still people use Windows nowadays)
+
 
 
 ## 4. Additional Notes
 ### MAC OS X LIBUSB -- IMPORTANT
-1. What works:
- You can enable the QuickTime config and discover QT capable devices with `qvh devices` and  `qvh activate` 
-
-2. What does not work
-
-This might be wrong, needs investigation--> `qvh dumpraw` won't work on MAC OS because the binary needs to be codesigned with `com.apple.ibridge.control`
- apparently that is a protected Entitlement that I have no idea how to use or sign my binary with. 
-
-2. Make sure to use either this fork `https://github.com/GroundControl-Solutions/libusb`
+1. Make sure to use either this fork `https://github.com/GroundControl-Solutions/libusb`
    or a LibUsb version BELOW 1.0.20 or iOS devices won't be found on Mac OS X.
    [See Github Issue](https://github.com/libusb/libusb/issues/290)
 

@@ -3,37 +3,49 @@ package packet
 import (
 	"encoding/binary"
 	"fmt"
+
 	"github.com/danielpaulus/quicktime_video_hack/screencapture/coremedia"
 )
 
-//AsynFeedPacket contains a CMSampleBuffer and there the actual video data
-type AsynFeedPacket struct {
-	AsyncMagic  uint32
+//AsynCmSampleBufPacket contains a CMSampleBuffer with audio or video data
+type AsynCmSampleBufPacket struct {
 	ClockRef    CFTypeID
-	MessageType uint32
 	CMSampleBuf coremedia.CMSampleBuffer
 }
 
-//NewAsynFeedPacketFromBytes parses a new AsynFeedPacket from bytes
-func NewAsynFeedPacketFromBytes(data []byte) (AsynFeedPacket, error) {
-	var packet = AsynFeedPacket{}
-	packet.AsyncMagic = binary.LittleEndian.Uint32(data)
-	if packet.AsyncMagic != AsynPacketMagic {
-		return packet, fmt.Errorf("invalid asyn magic: %x", data)
-	}
-	packet.ClockRef = binary.LittleEndian.Uint64(data[4:])
-	packet.MessageType = binary.LittleEndian.Uint32(data[12:])
-	if packet.MessageType != FEED {
-		return packet, fmt.Errorf("invalid packet type in asyn feed:%x", data)
-	}
-	entry, err := coremedia.NewCMSampleBufferFromBytes(data[16:])
+//NewAsynCmSampleBufPacketFromBytes parses a new AsynCmSampleBufPacket from bytes
+func NewAsynCmSampleBufPacketFromBytes(data []byte) (AsynCmSampleBufPacket, error) {
+	clockRef, sBuf, err := newAsynCmSampleBufferPacketFromBytes(data)
 	if err != nil {
-		return packet, err
+		return AsynCmSampleBufPacket{}, err
 	}
-	packet.CMSampleBuf = entry
-	return packet, nil
+	return AsynCmSampleBufPacket{ClockRef: clockRef, CMSampleBuf: sBuf}, nil
 }
 
-func (sp AsynFeedPacket) String() string {
-	return fmt.Sprintf("ASYN_FEED{ClockRef:%x, sBuf:%s}", sp.ClockRef, sp.CMSampleBuf.String())
+func newAsynCmSampleBufferPacketFromBytes(data []byte) (CFTypeID, coremedia.CMSampleBuffer, error) {
+	magic := binary.LittleEndian.Uint32(data[12:])
+	_, clockRef, err := ParseAsynHeader(data, magic)
+	if err != nil {
+		return 0, coremedia.CMSampleBuffer{}, err
+	}
+
+	var cMSampleBuf coremedia.CMSampleBuffer
+
+	if magic == FEED {
+		cMSampleBuf, err = coremedia.NewCMSampleBufferFromBytesVideo(data[16:])
+		if err != nil {
+			return 0, coremedia.CMSampleBuffer{}, err
+		}
+	} else {
+		cMSampleBuf, err = coremedia.NewCMSampleBufferFromBytesAudio(data[16:])
+		if err != nil {
+			return 0, coremedia.CMSampleBuffer{}, err
+		}
+	}
+
+	return clockRef, cMSampleBuf, nil
+}
+
+func (sp AsynCmSampleBufPacket) String() string {
+	return fmt.Sprintf("ASYN_SBUF{ClockRef:%x, sBuf:%s}", sp.ClockRef, sp.CMSampleBuf.String())
 }
